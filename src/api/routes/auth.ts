@@ -1,9 +1,9 @@
 import { Express } from 'express';
 import { DiscordAuthHelper, GitHubAuthHelper, validateSession } from '../../shared/AuthHelper';
 import { HTTPTools } from '../../shared/HTTPTools';
-import { server } from '../../../storage/config.json';
 import { DatabaseHelper } from '../../shared/Database';
 import { Logger } from '../../shared/Logger';
+import { Config } from '../../shared/Config';
 
 export class AuthRoutes {
     private app: Express;
@@ -16,23 +16,26 @@ export class AuthRoutes {
 
     private async loadRoutes() {
         this.app.get(`/api/auth`, async (req, res) => {
-            if (req.session.userId) {
-                return res.status(200).send({ message: `Hello, ${req.session.username}!`, username: req.session.username, userId: req.session.userId });
-            } else {
-                return res.status(401).send({ error: `Not logged in.` });
+            // #swagger.tags = ['Auth']
+            let session = await validateSession(req, res, false);
+            if (!session.approved) {
+                return;
             }
+            return res.status(200).send({ message: `Hello, ${session.user.username}!`, username: session.user.username, userId: session.user.id, roles: session.user.roles });
         });
 
         this.app.get(`/api/auth/logout`, async (req, res) => {
+            // #swagger.tags = ['Auth']
             req.session.destroy((err) => {
                 if (err) {
                     return res.status(500).send({ error: `Internal server error.` });
                 }
-                return res.status(200).send(`<head><meta http-equiv="refresh" content="0; url=${server.url}" /></head><body style="background-color: black;"><a style="color:white;" href="${server.url}">Click here if you are not redirected...</a></body>`);
+                return res.status(200).send(`<head><meta http-equiv="refresh" content="0; url=${Config.server.url}" /></head><body style="background-color: black;"><a style="color:white;" href="${Config.server.url}">Click here if you are not redirected...</a></body>`);
             });
         });
 
         this.app.get(`/api/auth/github`, async (req, res) => {
+            // #swagger.tags = ['Auth']
             let state = HTTPTools.createRandomString(16);
             this.validStates.push(state + req.ip);
             setTimeout(() => {
@@ -43,6 +46,7 @@ export class AuthRoutes {
         });
 
         this.app.get(`/api/auth/github/callback`, async (req, res) => {
+            // #swagger.tags = ['Auth']
             const code = req.query[`code`];
             const state = req.query[`state`];
 
@@ -66,20 +70,29 @@ export class AuthRoutes {
                 userDb = await DatabaseHelper.database.Users.create({
                     username: user.login,
                     githubId: user.id.toString(),
-                    roles: [],
+                    roles: {
+                        sitewide: [],
+                        perGame: {},
+                    },
                 });
 
                 Logger.log(`User ${user.login} signed up.`, `Auth`);
             }
 
             req.session.userId = userDb.id;
-            req.session.username = userDb.username;
             req.session.save();
 
+            Logger.log(`User ${userDb.username} logged in.`, `Auth`);
+            return res.status(200).send(`<head><meta http-equiv="refresh" content="0; url=${Config.server.url}" /></head><body style="background-color: black;"><a style="color:white;" href="${Config.server.url}">Click here if you are not redirected...</a></body>`); // i need to double check that this is the correct way to redirect
         });
 
         this.app.get(`/api/link/discord`, async (req, res) => {
+            // #swagger.tags = ['Auth']
             let session = await validateSession(req, res, false);
+            if (!session.approved) {
+                return;
+            }
+
             let state = HTTPTools.createRandomString(16);
             this.validStates.push(state + req.ip);
             setTimeout(() => {
@@ -90,7 +103,12 @@ export class AuthRoutes {
         });
 
         this.app.get(`/api/link/discord/callback`, async (req, res) => {
+            // #swagger.tags = ['Auth']
             let session = await validateSession(req, res, false); // this probably won't work, double check it tho...
+            if (!session.approved) {
+                return;
+            }
+            
             const code = req.query[`code`];
             const state = req.query[`state`];
 
@@ -116,8 +134,8 @@ export class AuthRoutes {
                 userDb.save();
             }
 
-            Logger.log(`User ${userDb.username} inked their discord.`, `Auth`);
-            return res.status(200).send(`<head><meta http-equiv="refresh" content="0; url=${server.url}" /></head><body style="background-color: black;"><a style="color:white;" href="${server.url}">Click here if you are not redirected...</a></body>`); // i need to double check that this is the correct way to redirect
+            Logger.log(`User ${userDb.username} linked their discord.`, `Auth`);
+            return res.status(200).send(`<head><meta http-equiv="refresh" content="0; url=${Config.server.url}" /></head><body style="background-color: black;"><a style="color:white;" href="${Config.server.url}">Click here if you are not redirected...</a></body>`); // i need to double check that this is the correct way to redirect
         });
     }
 }

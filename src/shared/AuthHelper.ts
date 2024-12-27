@@ -1,16 +1,11 @@
-import { auth, server, devmode, authBypass } from '../../storage/config.json';
-import { DatabaseHelper, User, UserRoles } from "./Database";
+import { Request, Response, NextFunction } from "express";
+import { Config } from "./Config";
+import { DatabaseHelper, SupportedGames, User, UserRoles } from "./Database";
 
 // eslint-disable-next-line quotes
 declare module 'express-session' {
     export interface Session {
         userId: number;
-        username: string;
-        avatarUrl: string;
-        csrf: {
-            token: string;
-            expiration: number;
-        };
     }
 }
 
@@ -157,14 +152,14 @@ export interface BeatSaverIdentify {
 */
 //#region Discord
 export class DiscordAuthHelper extends OAuth2Helper {
-    private static readonly callbackUrl = `${server.url}/api/auth/discord/callback`;
+    private static readonly callbackUrl = `${Config.server.url}/api/auth/discord/callback`;
     
     public static getUrl(state:string): string {
-        return `https://discord.com/oauth2/authorize?client_id=${auth.discord.clientId}&response_type=code&scope=identify&redirect_uri=${DiscordAuthHelper.callbackUrl}&state=${state}`;
+        return `https://discord.com/oauth2/authorize?client_id=${Config.auth.discord.clientId}&response_type=code&scope=identify&redirect_uri=${DiscordAuthHelper.callbackUrl}&state=${state}`;
     }
 
     public static getToken(code:string): Promise<OAuth2Response> {
-        return super.getToken(`https://discord.com/api/v10/oauth2/token`, code, auth.discord, this.callbackUrl);
+        return super.getToken(`https://discord.com/api/v10/oauth2/token`, code, Config.auth.discord, this.callbackUrl);
     }
 
     public static async getUser(token: string): Promise<DiscordIdentify | null> {
@@ -175,16 +170,6 @@ export class DiscordAuthHelper extends OAuth2Helper {
             return Idjson;
         } else {
             return null;
-        }
-    }
-
-    public static async getGuildMemberData(token: string, guildId: string, userId:string): Promise<DiscordUserGuild | null> {
-        const userIdRequest = await fetch(`https://discord.com/api/v10/users/@me/guilds/${guildId}/member`, super.getRequestData(token));
-        const Idjson: DiscordUserGuild = await userIdRequest.json() as DiscordUserGuild;
-        if (!Idjson.roles) {
-            return null;
-        } else {
-            return Idjson;
         }
     }
 }
@@ -214,14 +199,14 @@ export interface DiscordUserGuild {
 
 //#region GitHub
 export class GitHubAuthHelper extends OAuth2Helper {
-    private static readonly callbackUrl = `${server.url}/api/auth/github/callback`;
+    private static readonly callbackUrl = `${Config.server.url}/api/auth/github/callback`;
     
     public static getUrl(state:string): string {
-        return `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(auth.github.clientId)}&response_type=code&scope=user&redirect_uri=${encodeURIComponent(GitHubAuthHelper.callbackUrl)}&state=${encodeURIComponent(state)}`;
+        return `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(Config.auth.github.clientId)}&response_type=code&scope=user&redirect_uri=${encodeURIComponent(GitHubAuthHelper.callbackUrl)}&state=${encodeURIComponent(state)}`;
     }
 
     public static getToken(code:string): Promise<OAuth2Response> {
-        return super.getToken(`https://github.com/login/oauth/access_token`, code, auth.github, this.callbackUrl);
+        return super.getToken(`https://github.com/login/oauth/access_token`, code, Config.auth.github, this.callbackUrl);
     }
 
     public static async getUser(token: string): Promise<GitHubPublicUser | null> {
@@ -347,36 +332,38 @@ export interface GitHubPublicUser {
     If True, the user must not be banned.
     If a UserRoles, the user must have that role.
 */
-export async function validateSession(req: any, res: any, role: UserRoles|boolean = UserRoles.Admin, handleRequest:boolean = true): Promise<{approved: boolean, user: User}> {
+export async function validateSession(req: any, res: any, role: UserRoles|boolean = UserRoles.Admin, gameName:SupportedGames = null, handleRequest:boolean = true): Promise<{approved: boolean, user: User|null }> {
     let sessionId = req.session.userId;
-    if (devmode && authBypass) {
+    // check for devmode options
+    if (Config.devmode && Config.authBypass) {
         let user = await DatabaseHelper.database.Users.findOne({ where: { id: 1 } });
         return { approved: true, user: user };
     }
+
+    // check if signed in
     if (!sessionId) {
         if (handleRequest) {
-            return res.status(401).send({ message: `Unauthorized.` });
-        } else {
-            return { approved: false, user: null };
+            res.status(401).send({ message: `Unauthorized.` });
         }
+        return { approved: false, user: null };
     }
     
+    // check if valid user
     let user = await DatabaseHelper.database.Users.findOne({ where: { id: sessionId } });
     if (!user) {
         if (handleRequest) {
-            return res.status(401).send({ message: `Unauthorized.` });
-        } else {
-            return { approved: false, user: null };
+            res.status(401).send({ message: `Unauthorized.` });
         }
+        return { approved: false, user: null };
     }
 
+    // check if user is banned only
     if (typeof role === `boolean` && role == true) {
-        if (user.roles.includes(UserRoles.Banned)) {
+        if (user.roles.sitewide.includes(UserRoles.Banned) || (gameName && user.roles.perGame[gameName]?.includes(UserRoles.Banned))) {
             if (handleRequest) {
-                return res.status(401).send({ message: `Unauthorized.` });
-            } else {
-                return { approved: false, user: null };
+                res.status(401).send({ message: `Unauthorized.` });
             }
+            return { approved: false, user: null };
         } else {
             return { approved: true, user: user };
         }
@@ -384,13 +371,30 @@ export async function validateSession(req: any, res: any, role: UserRoles|boolea
         return { approved: true, user: user };
     }
 
-    if (user.roles.includes(role)) {
+    // check if user has role (yes, sitewide overrides perGame roles. hence the name, "sitewide")
+    if (user.roles.sitewide.includes(role) || (gameName && user.roles.perGame[gameName]?.includes(role))) {
         return { approved: true, user: user };
     } else {
-        if (handleRequest) {
-            return res.status(401).send({ message: `Unauthorized.` });
+        if (user.roles.sitewide.includes(UserRoles.AllPermissions) || (gameName && user.roles.perGame[gameName]?.includes(UserRoles.AllPermissions))) {
+            return { approved: true, user: user };
         } else {
+            if (handleRequest) {
+                res.status(401).send({ message: `Unauthorized.` });
+            }
             return { approved: false, user: null };
         }
     }
+}
+
+export function validateAdditionalGamePermissions(session: {approved: boolean, user: User}, gameName: SupportedGames, role:UserRoles = UserRoles.Admin): boolean {
+    if (!session.approved) {
+        return false;
+    }
+    if (session.user.roles.sitewide.includes(UserRoles.AllPermissions) || session.user.roles.sitewide.includes(role)) {
+        return true;
+    }
+    if (session.user.roles.perGame[gameName]?.includes(UserRoles.AllPermissions) || session.user.roles.perGame[gameName]?.includes(role)) {
+        return true;
+    }
+    return false;
 }
